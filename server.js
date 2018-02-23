@@ -429,7 +429,9 @@ export class FilesCollection extends FilesCollectionCore {
               }
 
               if (!httpResp.finished) {
-                if (_.isObject(error) && _.isFunction(error.toString)) {
+                if (error instanceof Meteor.Error)
+                  error = error.error;
+                else if (_.isObject(error) && _.isFunction(error.toString)) {
                   error = error.toString();
                 }
 
@@ -488,17 +490,21 @@ export class FilesCollection extends FilesCollectionCore {
                   ({result, opts}  = this._prepareUpload(_.extend(opts, _continueUpload), user.userId, 'HTTP'));
 
                   if (opts.eof) {
-                    this._handleUpload(result, opts, () => {
-                      if (!httpResp.headersSent) {
-                        httpResp.writeHead(200);
-                      }
+                    this._handleUpload(result, opts, error => {
+                      if (error)
+                        handleError(error)
+                      else {
+                        if (!httpResp.headersSent) {
+                          httpResp.writeHead(200);
+                        }
 
-                      if (_.isObject(result.file) && result.file.meta) {
-                        result.file.meta = fixJSONStringify(result.file.meta);
-                      }
+                        if (_.isObject(result.file) && result.file.meta) {
+                          result.file.meta = fixJSONStringify(result.file.meta);
+                        }
 
-                      if (!httpResp.finished) {
-                        httpResp.end(JSON.stringify(result));
+                        if (!httpResp.finished) {
+                          httpResp.end(JSON.stringify(result));
+                        }
                       }
                     });
                     return;
@@ -903,19 +909,24 @@ export class FilesCollection extends FilesCollectionCore {
     result.public = this.public;
     this._updateFileTypes(result);
 
-    this.collection.insert(_.clone(result), (error, _id) => {
-      if (error) {
-        cb && cb(error);
-        this._debug('[FilesCollection] [Upload] [_finishUpload] Error:', error);
-      } else {
-        this._preCollection.update({_id: opts.fileId}, {$set: {isFinished: true}});
-        result._id = _id;
-        this._debug(`[FilesCollection] [Upload] [finish(ed)Upload] -> ${result.path}`);
-        this.onAfterUpload && this.onAfterUpload.call(this, result);
-        this.emit('afterUpload', result);
-        cb && cb(null, result);
-      }
-    });
+    this.collection
+      .rawCollection()
+      .insertOne(_.clone(result))
+      .then(insertResult => {
+          this._preCollection.update({_id: opts.fileId}, {$set: {isFinished: true}});
+          result._id = insertResult.insertedId;
+          this._debug(`[FilesCollection] [Upload] [finish(ed)Upload] -> ${result.path}`);
+          
+          return this.onAfterUpload && this.onAfterUpload.call(this, result);
+      })
+      .then(() => {
+          this.emit('afterUpload', result);
+          cb && cb(null, result);
+      })
+      .catch(error => {
+          cb && cb(error);
+          // this._debug('[FilesCollection] [Upload] [_finishUpload] Error:', error);
+      });
   }
 
   /*
